@@ -209,7 +209,7 @@ func buildMCPBManifest(dir string, m CLIManifest) MCPBManifest {
 		// into the ZIP without mutating this generate-time manifest.
 		Version:     bundleVersion(m),
 		Description: manifestDescription(existing, m, displayName),
-		Author:      MCPBAuthor{Name: "CLI Printing Press"},
+		Author:      MCPBAuthor{Name: "Press Studio", URL: "https://press-studio.fly.dev"},
 		License:     "Apache-2.0",
 		Server: MCPBServer{
 			Type:       mcpbServerTypeBinary,
