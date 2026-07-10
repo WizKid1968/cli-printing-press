@@ -317,6 +317,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"typeFieldIdent":                      typeFieldIdent,
 		"typeFieldJSONTagComment":             typeFieldJSONTagComment,
 		"safeTypeName":                        safeTypeName,
+		"jsonTagName":                         jsonTagName,
 		"hasNonScalarType": func(types map[string]spec.TypeDef) bool {
 			for _, td := range types {
 				for _, f := range td.Fields {
@@ -7791,6 +7792,35 @@ func safeTypeName(name string) string {
 		result = "T" + result
 	}
 	return result
+}
+
+// jsonTagName sanitizes a field's wire name so it always produces a VALID Go
+// struct tag `json:"..."` value. Real JSON keys can contain characters that
+// break struct-tag syntax and trip `go vet`'s structtag check — a double quote
+// or backtick terminates the tag literal, a comma is read as an option
+// separator, and a space is flagged as "suspicious space in struct tag value".
+// We saw this in the wild: a Barchart quote field literally named `lpcal, lccal`
+// (comma + space) emitted `json:"lpcal, lccal"`, which compiled but failed vet,
+// blocking shipcheck. Ordinary field names pass through unchanged; only the
+// offending characters are dropped. A name that sanitizes to empty becomes "-"
+// (encoding/json's "skip this field"), keeping the struct valid.
+func jsonTagName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '"' || r == '`' || r == ',':
+			// invalid in a struct tag json name — drop
+		case unicode.IsSpace(r):
+			// "suspicious space" per go vet — drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "-"
+	}
+	return out
 }
 
 // goKeywords is the set of reserved words from the Go language spec

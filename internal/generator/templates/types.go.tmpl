@@ -11,7 +11,7 @@ type {{safeTypeName $name}} struct {
 {{- with typeFieldJSONTagComment .}}
 	// JSON tag: {{.}}
 {{- end}}
-	{{camel (typeFieldIdent .)}} {{goStructType .Type}} `json:"{{.Name}}{{if .OmitEmpty}},omitempty{{end}}"`
+	{{camel (typeFieldIdent .)}} {{goStructType .Type}} `json:"{{jsonTagName .Name}}{{if .OmitEmpty}},omitempty{{end}}"`
 {{- end}}
 }
 {{end}}
