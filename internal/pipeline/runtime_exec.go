@@ -31,7 +31,15 @@ func buildCLITo(dir, binaryPath string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Compiling a freshly generated CLI from a cold build cache is slow: a
+	// 27-command CLI measured 243s on a shared-cpu-4x host, and callers that
+	// serialize package builds to cap peak link memory (GOFLAGS=-p=1) push it
+	// higher still. At 2 minutes the build was SIGKILLed mid-compile and
+	// surfaced as "go build: signal: killed", which reads as a broken CLI —
+	// the generated code was fine and scored 27/27 once the cache was warm.
+	//
+	// 15 minutes still bounds a genuinely hung build.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", buildCLIArgs(binaryPath, "./"+filepath.Base(cmdDir))...)
 	cmd.Dir = filepath.Dir(cmdDir)
