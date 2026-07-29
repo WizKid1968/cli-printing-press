@@ -97,7 +97,21 @@ func (v *Verifier) CompileGate() error {
 		return fmt.Errorf("pre-compile cleanup: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// This budget covers `go build ./...` AND `go vet ./...` below, both run
+	// from a cold cache on the first verify of a freshly generated CLI.
+	//
+	// 2 minutes was too tight and produced false FAILs: a 27-command CLI
+	// measured 243s to build cold (vet adds ~12s) on a shared-cpu-4x host,
+	// and the press serializes package builds with GOFLAGS=-p=1 to stay under
+	// the memory ceiling, which makes it slower still. The build was killed at
+	// the deadline ("go build: signal: killed") and reported as a verify
+	// failure, so a perfectly good CLI — one that passes 27/27 once the cache
+	// is warm — failed shipcheck and refunded the customer.
+	//
+	// 15 minutes keeps the hang protection this timeout exists for while
+	// leaving room for large specs; it stays well inside the caller's
+	// press-level watchdog.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	build := exec.CommandContext(ctx, "go", "build", "./...")
