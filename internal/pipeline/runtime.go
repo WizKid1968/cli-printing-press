@@ -638,9 +638,22 @@ func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, exp
 	dbPath := filepath.Join(tmpDir, "test.db")
 	env = append(env, "HOME="+tmpDir) // so sync uses temp location
 
-	// Test sync (if it exists)
+	// Test sync (if it exists).
+	//
+	// This is a smoke test of the sync->sql->search pipeline, not a data load.
+	// `--full` asks for the entire dataset, and on a rich API that is unbounded
+	// work: a crates.io CLI paginated 22,300+ rows at 2 req/s and was nowhere
+	// near done when the 30s budget expired. Every attempt then "failed" and the
+	// pipeline was reported as "sync crashed" — discarding a CLI whose commands
+	// all passed. Lead with --latest-only, which caps each resource at one page
+	// and is exactly what proving the pipeline requires. The --full variants stay
+	// as fallbacks for CLIs that don't accept the flag.
 	var syncErrors []error
-	syncErr := runCLI(binary, []string{"sync", "--db", dbPath, "--resources", "repos", "--full"}, env, 30*time.Second)
+	syncErr := runCLI(binary, []string{"sync", "--db", dbPath, "--latest-only"}, env, 30*time.Second)
+	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
+		syncErr = runCLI(binary, []string{"sync", "--db", dbPath, "--resources", "repos", "--full"}, env, 30*time.Second)
+	}
 	if syncErr != nil {
 		syncErrors = append(syncErrors, syncErr)
 		syncErr = runCLI(binary, []string{"sync", "--db", dbPath, "--full"}, env, 30*time.Second)

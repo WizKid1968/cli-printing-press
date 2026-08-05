@@ -388,7 +388,11 @@ func TestRunDataPipelineTestSkipsUnsyncableCLIs(t *testing.T) {
 	})
 }
 
-func TestFinalizeVerifyReportFailsRequiredDataPipeline(t *testing.T) {
+// A dead data pipeline no longer vetoes a CLI whose commands all work. sync is
+// an offline-cache convenience, not the customer's API surface. As an absolute
+// gate this discarded presses scoring 35/35 with zero critical failures because
+// one bulk-download probe ran out of budget — punishing the richest APIs hardest.
+func TestFinalizeVerifyReportWarnsWhenOnlyDataPipelineFails(t *testing.T) {
 	report := &VerifyReport{
 		DataPipeline:       false,
 		DataPipelineDetail: "FAIL: 1 domain tables created but 0 rows after sync (mock mode)",
@@ -396,6 +400,23 @@ func TestFinalizeVerifyReportFailsRequiredDataPipeline(t *testing.T) {
 			Command: "items",
 			Score:   3,
 		}},
+	}
+
+	finalizeVerifyReport(report, 80, true)
+
+	assert.Equal(t, "WARN", report.Verdict, "healthy commands + dead pipeline should warn, not discard the CLI")
+}
+
+// The gate still bites when the commands themselves are weak: a dead pipeline
+// beside failing commands is a broken deliverable, not a caveat.
+func TestFinalizeVerifyReportFailsWhenDataPipelineAndCommandsBothFail(t *testing.T) {
+	report := &VerifyReport{
+		DataPipeline:       false,
+		DataPipelineDetail: "FAIL: sync crashed",
+		Results: []CommandResult{
+			{Command: "items", Score: 0},
+			{Command: "detail", Score: 3},
+		},
 	}
 
 	finalizeVerifyReport(report, 80, true)

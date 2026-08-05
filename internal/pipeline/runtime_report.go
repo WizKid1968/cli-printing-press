@@ -32,11 +32,24 @@ func finalizeVerifyReport(report *VerifyReport, threshold int, requireDataPipeli
 		report.PassRate = float64(report.Passed) / float64(report.Total) * 100
 	}
 
-	passGate := report.PassRate >= float64(threshold) && report.Critical == 0
+	commandsGate := report.PassRate >= float64(threshold) && report.Critical == 0
+	passGate := commandsGate
 	if requireDataPipeline {
 		passGate = passGate && report.DataPipeline
 	}
 	switch {
+	// A data-pipeline failure alone no longer vetoes an otherwise healthy CLI.
+	// `sync` is auxiliary scaffolding — an offline-cache convenience — not the
+	// customer's API surface, and the deliverable is the command set. As an
+	// absolute gate this discarded presses scoring 35/35 with zero critical
+	// failures because one bulk-download probe ran out of budget, which punished
+	// the richest APIs hardest and made verdicts irreproducible run to run.
+	//
+	// With every command passing and nothing critical, report WARN so the caller
+	// ships with the caveat recorded. If the commands themselves are weak, the
+	// gates below still fail the press on that evidence.
+	case requireDataPipeline && !report.DataPipeline && commandsGate:
+		report.Verdict = "WARN"
 	case requireDataPipeline && !report.DataPipeline:
 		report.Verdict = "FAIL"
 	case passGate:
