@@ -139,6 +139,13 @@ type Generator struct {
 	Narrative       *ReadmeNarrative        // LLM-authored prose for README/SKILL; optional
 	AsyncJobs       map[string]AsyncJobInfo // Detected async-job endpoints, keyed by "<resource>/<endpoint>"
 
+	// emittedStems maps a lowercased internal/cli file stem to the exact stem
+	// first emitted under it, so two endpoints whose names differ only in case
+	// cannot generate two colliding files. See uniqueFileStem.
+	emittedStems map[string]string
+	// stemCollisions counts disambiguations per lowercased stem.
+	stemCollisions map[string]int
+
 	// ModulePath overrides the Go module import path emitted by templates that
 	// reference internal packages (`{{modulePath}}/internal/client`, etc.).
 	// Defaults to `<api>-pp-cli` when empty — matches the standalone-publish
@@ -3414,7 +3421,7 @@ func (g *Generator) renderResourceCommands(promotedResourceNames map[string]bool
 				Hidden:        hideTopLevelResources,
 				APISpec:       g.Spec,
 			}
-			parentPath := filepath.Join("internal", "cli", safeResourceFileStem(name)+".go")
+			parentPath := filepath.Join("internal", "cli", g.uniqueFileStem(name)+".go")
 			if err := g.renderTemplate("command_parent.go.tmpl", parentPath, parentData); err != nil {
 				return fmt.Errorf("rendering parent command %s: %w", name, err)
 			}
@@ -3446,7 +3453,7 @@ func (g *Generator) renderResourceCommands(promotedResourceNames map[string]bool
 				IsReadOnly:    endpointIsReadCommand(endpoint, eName),
 				APISpec:       g.Spec,
 			}
-			epPath := filepath.Join("internal", "cli", safeResourceFileStem(name+"_"+eName)+".go")
+			epPath := filepath.Join("internal", "cli", g.uniqueFileStem(name+"_"+eName)+".go")
 			if err := g.renderTemplate("command_endpoint.go.tmpl", epPath, epData); err != nil {
 				return fmt.Errorf("rendering endpoint %s/%s: %w", name, eName, err)
 			}
@@ -3476,7 +3483,7 @@ func (g *Generator) renderResourceCommands(promotedResourceNames map[string]bool
 				Hidden:        false,
 				APISpec:       g.Spec,
 			}
-			subParentPath := filepath.Join("internal", "cli", safeResourceFileStem(name+"_"+subName)+".go")
+			subParentPath := filepath.Join("internal", "cli", g.uniqueFileStem(name+"_"+subName)+".go")
 			if err := g.renderTemplate("command_parent.go.tmpl", subParentPath, subParentData); err != nil {
 				return fmt.Errorf("rendering sub-parent %s/%s: %w", name, subName, err)
 			}
@@ -3506,7 +3513,7 @@ func (g *Generator) renderResourceCommands(promotedResourceNames map[string]bool
 					IsReadOnly:    endpointIsReadCommand(endpoint, eName),
 					APISpec:       g.Spec,
 				}
-				epPath := filepath.Join("internal", "cli", safeResourceFileStem(name+"_"+subName+"_"+eName)+".go")
+				epPath := filepath.Join("internal", "cli", g.uniqueFileStem(name+"_"+subName+"_"+eName)+".go")
 				if err := g.renderTemplate("command_endpoint.go.tmpl", epPath, epData); err != nil {
 					return fmt.Errorf("rendering sub-endpoint %s/%s/%s: %w", name, subName, eName, err)
 				}
@@ -4677,7 +4684,7 @@ func (g *Generator) renderPromotedCommandFiles(promotedCommands []PromotedComman
 			NovelChildren:     novelChildrenByParent[toKebab(pc.PromotedName)],
 			APISpec:           g.Spec,
 		}
-		promotedPath := filepath.Join("internal", "cli", safeResourceFileStem("promoted_"+pc.PromotedName)+".go")
+		promotedPath := filepath.Join("internal", "cli", g.uniqueFileStem("promoted_"+pc.PromotedName)+".go")
 		if err := g.renderTemplate("command_promoted.go.tmpl", promotedPath, promotedData); err != nil {
 			return fmt.Errorf("rendering promoted command %s: %w", pc.PromotedName, err)
 		}
@@ -7270,6 +7277,45 @@ var goarchTokens = map[string]struct{}{
 //	safeResourceFileStem("webhook_test")           -> "webhook_test_cmd"
 //	safeResourceFileStem("scheduling_window_days") -> "scheduling_window_days" (no change)
 //	safeResourceFileStem("feedback")               -> "feedback" (no change; rejected at parse)
+// uniqueFileStem is safeResourceFileStem plus case-collision protection.
+//
+// Go rejects a package containing two files whose names differ only in case,
+// and case-insensitive filesystems (macOS, Windows) cannot even hold both. A
+// seekingalpha spec carried `symbols_list_PAYX` and `symbols_list_payx` — the
+// same endpoint captured twice with a differently-cased parameter value — and
+// generate happily emitted both, so every downstream build died with:
+//
+//	case-insensitive file name collision:
+//	  "seekingalpha-symbols_list_PAYX.go" and "seekingalpha-symbols_list_payx.go"
+//
+// The CLI was unbuildable and no verify, dogfood or shipcheck leg could run.
+// Go identifiers stay case-sensitive, so only the filename needs disambiguating.
+func (g *Generator) uniqueFileStem(stem string) string {
+	safe := safeResourceFileStem(stem)
+	if g.emittedStems == nil {
+		g.emittedStems = make(map[string]string)
+		g.stemCollisions = make(map[string]int)
+	}
+	key := strings.ToLower(safe)
+	prev, seen := g.emittedStems[key]
+	if !seen {
+		g.emittedStems[key] = safe
+		return safe
+	}
+	// An EXACT repeat is not a case collision, and must not be renamed. Callers
+	// rely on getting the same path back so their existing "this command file
+	// already exists, skip wiring it again" logic still fires — renaming here
+	// produced two files declaring the same Go identifier and broke the build,
+	// which is the opposite of the problem this function exists to solve.
+	if prev == safe {
+		return safe
+	}
+	// A genuine case-only collision. Deterministic for a given spec because
+	// resources and endpoints are emitted in sorted order.
+	g.stemCollisions[key]++
+	return fmt.Sprintf("%s_%d", safe, g.stemCollisions[key]+1)
+}
+
 func safeResourceFileStem(stem string) string {
 	parts := strings.Split(stem, "_")
 	if len(parts) >= 2 {
