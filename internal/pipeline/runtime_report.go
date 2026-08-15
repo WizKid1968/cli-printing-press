@@ -59,7 +59,22 @@ func finalizeVerifyReport(report *VerifyReport, threshold int, requireDataPipeli
 	default:
 		report.Verdict = "FAIL"
 	}
+	// A missing browser-session proof is a SETUP state, not a broken CLI, and as
+	// an absolute veto it discarded healthy work. Measured: an autotempest press
+	// scored 96% (27/28, 1 critical) and was refunded outright because no one had
+	// run `auth login --chrome` — which an automated pipeline cannot do, since
+	// the proof requires a human logging into a real browser. Every cookie-auth
+	// site is unshippable under that rule no matter how well it builds.
+	//
+	// Same reasoning as the data-pipeline gate above: when the command surface is
+	// otherwise healthy, report WARN so the caller ships with the caveat recorded
+	// and tells the user to authenticate. If the commands themselves are weak,
+	// the gates above have already failed it on that evidence.
 	if report.BrowserSessionRequired && report.BrowserSessionProof != "valid" {
-		report.Verdict = "FAIL"
+		if report.Verdict == "PASS" || report.Verdict == "WARN" {
+			report.Verdict = "WARN"
+		} else {
+			report.Verdict = "FAIL"
+		}
 	}
 }
