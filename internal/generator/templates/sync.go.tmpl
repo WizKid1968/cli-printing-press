@@ -3697,11 +3697,17 @@ var pageItemKeys = []string{
 var dataEnvelopeKeys = []string{"data", "Data", "result", "Result"}
 
 func responsePathForResource(resource, path string) []string {
-	switch resource + "\x00" + path {
+	// Boolean-condition switch, not a constant switch: two operations on the
+	// same path (GET and POST /api/query) emit the same key, and Go rejects a
+	// duplicate CONSTANT case while accepting a duplicate condition. arXiv's
+	// published spec hits this, and the generated CLI would not compile:
+	//   internal/cli/sync.go: duplicate case "query\x00/api/query"
+	// First match wins, which is the same behaviour a deduped switch would give.
+	switch key := resource + "\x00" + path; {
 {{- range $resourceName, $resource := .Resources}}
 {{- range $endpointName, $endpoint := $resource.Endpoints}}
 {{- if $endpoint.ResponsePath}}
-	case {{printf "%q" (printf "%s\x00%s" $resourceName $endpoint.Path)}}:
+	case key == {{printf "%q" (printf "%s\x00%s" $resourceName $endpoint.Path)}}:
 		return []string{ {{printf "%q" $endpoint.ResponsePath}} }
 {{- end}}
 {{- end}}

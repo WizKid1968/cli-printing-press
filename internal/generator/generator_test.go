@@ -20358,3 +20358,23 @@ func TestGenerateSkipsOptionsEndpoints(t *testing.T) {
 	// uncompileable Go.
 	runGoCommand(t, outputDir, "build", "./...")
 }
+
+// arXiv's published spec puts two operations on the same path, so
+// responsePathForResource emitted the same constant case twice and the
+// generated CLI would not compile:
+//   internal/cli/sync.go: duplicate case "query\x00/api/query"
+// The template uses a boolean-condition switch, where duplicate conditions are
+// legal Go and first-match-wins.
+func TestSyncResponsePathSwitchIsDuplicateSafe(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("templates", "sync.go.tmpl"))
+	if err != nil {
+		t.Fatalf("reading sync template: %v", err)
+	}
+	body := string(src)
+	if strings.Contains(body, `switch resource + "\x00" + path {`) {
+		t.Fatal("constant-expression switch restored: two operations on one path will emit a duplicate case and break the build")
+	}
+	if !strings.Contains(body, `switch key := resource + "\x00" + path; {`) {
+		t.Fatal("expected the boolean-condition switch form in responsePathForResource")
+	}
+}
