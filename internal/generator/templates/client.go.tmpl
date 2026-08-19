@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -1631,7 +1632,20 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 				}
 				return env, resp.StatusCode, nil
 			}
-			return json.RawMessage(sanitizeJSONResponse(respBody)), resp.StatusCode, nil
+			body := sanitizeJSONResponse(respBody)
+			// XML bodies (Atom/RSS feeds, SOAP, vendor +xml types) are decoded
+			// to JSON here so every downstream consumer — CLI output, --json,
+			// MCP tools, the local store, pagination — keeps the
+			// json.RawMessage contract it already depends on. Without this the
+			// raw "<feed ...>" bytes reach assertLiveJSONBody and are reported
+			// as an authentication failure, which is wrong for any API that
+			// simply answers in XML.
+			if isXMLResponseContentType(resp.Header.Get("Content-Type")) {
+				if converted, ok := xmlResponseToJSON(body); ok {
+					return converted, resp.StatusCode, nil
+				}
+			}
+			return json.RawMessage(body), resp.StatusCode, nil
 		}
 
 		if !binaryResponse {
@@ -2387,6 +2401,194 @@ func isBinaryResponseContentType(ct string) bool {
 		return false
 	}
 	return true
+}
+
+// isXMLResponseContentType reports whether a successful body should be decoded
+// from XML into JSON. It covers application/xml, text/xml, and every vendor
+// +xml type (application/atom+xml, application/rss+xml, ...). text/html and
+// application/xhtml+xml are excluded: those belong to the response_format:html
+// extraction path, which reads markup rather than structured data.
+func isXMLResponseContentType(ct string) bool {
+	mt := strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = strings.TrimSpace(mt[:i])
+	}
+	switch {
+	case mt == "application/xhtml+xml":
+		return false
+	case mt == "application/xml", mt == "text/xml":
+		return true
+	default:
+		return strings.HasSuffix(mt, "+xml")
+	}
+}
+
+// xmlResponseToJSON decodes an XML document into JSON, keyed by the root
+// element's local name. Attributes become "@name" keys, repeated sibling
+// elements collapse into arrays, and leaf elements become their trimmed text.
+// Namespace prefixes are dropped in favour of local names so feeds read
+// naturally (OpenSearch's opensearch:totalResults becomes totalResults).
+//
+// Returns ok=false when the body is not decodable XML, leaving the caller's
+// original bytes untouched — a Content-Type that lies about the payload must
+// not turn into a hard error.
+//
+// ponytail: generic tree walk, no per-API schema. A spec-driven typed decoder
+// only earns its keep if some API needs XML attributes and elements of the
+// same name to stay distinguishable.
+func xmlResponseToJSON(body []byte) (json.RawMessage, bool) {
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	// Non-UTF-8 declarations (ISO-8859-1 is still common in older XML APIs)
+	// otherwise abort the token stream on the very first token.
+	dec.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil }
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		start, isStart := tok.(xml.StartElement)
+		if !isStart {
+			continue
+		}
+		val, err := decodeXMLElement(dec, start, 0)
+		if err != nil {
+			return nil, false
+		}
+		lists := map[string]bool{}
+		collectXMLListPaths(val, start.Name.Local, lists)
+		val = normalizeXMLLists(val, start.Name.Local, lists)
+		out, err := json.Marshal(map[string]any{start.Name.Local: val})
+		if err != nil {
+			return nil, false
+		}
+		return out, true
+	}
+}
+
+// xmlMaxDepth bounds decodeXMLElement's recursion. A response body is
+// untrusted input, and deeply nested XML must not be able to exhaust the
+// stack — the same failure encoding/xml itself added a guard for in
+// GO-2026-6088. Real documents nest a handful of levels.
+const xmlMaxDepth = 100
+
+// decodeXMLElement consumes tokens up to start's matching end element and
+// returns its JSON value: a string for a bare leaf, otherwise an object.
+// Exceeding xmlMaxDepth returns an error, which makes xmlResponseToJSON leave
+// the body untouched rather than crash the process.
+func decodeXMLElement(dec *xml.Decoder, start xml.StartElement, depth int) (any, error) {
+	if depth >= xmlMaxDepth {
+		return nil, fmt.Errorf("xml nesting deeper than %d levels", xmlMaxDepth)
+	}
+	obj := map[string]any{}
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "xmlns" || attr.Name.Space == "xmlns" {
+			continue
+		}
+		obj["@"+attr.Name.Local] = attr.Value
+	}
+	var text strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			child, err := decodeXMLElement(dec, t, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			addXMLChild(obj, t.Name.Local, child)
+		case xml.CharData:
+			text.Write(t)
+		case xml.EndElement:
+			trimmed := strings.Join(strings.Fields(text.String()), " ")
+			if len(obj) == 0 {
+				return trimmed, nil
+			}
+			if trimmed != "" {
+				obj["#text"] = trimmed
+			}
+			return obj, nil
+		}
+	}
+}
+
+// addXMLChild sets obj[name], promoting to an array when the name repeats so
+// that a feed's <entry> siblings arrive as a JSON list.
+func addXMLChild(obj map[string]any, name string, val any) {
+	prev, seen := obj[name]
+	if !seen {
+		obj[name] = val
+		return
+	}
+	if arr, isArr := prev.([]any); isArr {
+		obj[name] = append(arr, val)
+		return
+	}
+	obj[name] = []any{prev, val}
+}
+
+// collectXMLListPaths records every element path that repeated somewhere in the
+// document. XML has no cardinality marker, so a lone <author> and a pair of
+// them decode to different JSON shapes; without this, one arXiv response can
+// hand back entry[0].author as an array and entry[1].author as an object, and
+// a consumer indexing the field breaks on the second row.
+//
+// ponytail: consistency holds within a response, not across responses — a
+// single-result query still yields feed.entry as an object because nothing in
+// that document repeats. Removing that needs a schema saying which elements are
+// collections, and the OpenAPI schemas for XML APIs describe an imagined JSON
+// shape whose property names ("entries", "authors") do not match the wire
+// element names, so they cannot supply it. Wire up per-endpoint element hints
+// if some API makes the cross-response wobble hurt.
+func collectXMLListPaths(node any, path string, lists map[string]bool) {
+	obj, isObj := node.(map[string]any)
+	if !isObj {
+		return
+	}
+	for name, val := range obj {
+		if strings.HasPrefix(name, "@") || name == "#text" {
+			continue
+		}
+		child := path + "/" + name
+		if arr, isArr := val.([]any); isArr {
+			lists[child] = true
+			for _, item := range arr {
+				collectXMLListPaths(item, child, lists)
+			}
+			continue
+		}
+		collectXMLListPaths(val, child, lists)
+	}
+}
+
+// normalizeXMLLists promotes every single value sitting at a path that repeated
+// elsewhere in the document into a one-element array.
+func normalizeXMLLists(node any, path string, lists map[string]bool) any {
+	obj, isObj := node.(map[string]any)
+	if !isObj {
+		return node
+	}
+	for name, val := range obj {
+		if strings.HasPrefix(name, "@") || name == "#text" {
+			continue
+		}
+		child := path + "/" + name
+		if arr, isArr := val.([]any); isArr {
+			for i := range arr {
+				arr[i] = normalizeXMLLists(arr[i], child, lists)
+			}
+			continue
+		}
+		normalized := normalizeXMLLists(val, child, lists)
+		if lists[child] {
+			obj[name] = []any{normalized}
+		} else {
+			obj[name] = normalized
+		}
+	}
+	return obj
 }
 
 // wrapBinaryResponse marshals body into a self-describing base64 envelope.
