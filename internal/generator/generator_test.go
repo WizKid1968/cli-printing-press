@@ -20374,7 +20374,17 @@ func TestSyncResponsePathSwitchIsDuplicateSafe(t *testing.T) {
 	if strings.Contains(body, `switch resource + "\x00" + path {`) {
 		t.Fatal("constant-expression switch restored: two operations on one path will emit a duplicate case and break the build")
 	}
-	if !strings.Contains(body, `switch key := resource + "\x00" + path; {`) {
+	if !strings.Contains(body, "switch {") {
 		t.Fatal("expected the boolean-condition switch form in responsePathForResource")
+	}
+	// The variable must live OUTSIDE the switch. Declaring it in the switch
+	// header (`switch key := ...; {`) breaks every spec with no response paths:
+	// zero cases means key is never used, and Go rejects that. The first version
+	// of this fix did exactly that and broke 23 builds.
+	if strings.Contains(body, `switch key := resource`) {
+		t.Fatal("key declared in the switch header: a spec with no response paths will not compile")
+	}
+	if !strings.Contains(body, "_ = key") {
+		t.Fatal("missing the guard that keeps key used when no cases are emitted")
 	}
 }

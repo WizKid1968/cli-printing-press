@@ -3703,7 +3703,13 @@ func responsePathForResource(resource, path string) []string {
 	// published spec hits this, and the generated CLI would not compile:
 	//   internal/cli/sync.go: duplicate case "query\x00/api/query"
 	// First match wins, which is the same behaviour a deduped switch would give.
-	switch key := resource + "\x00" + path; {
+	// `key` is declared inside the switch so it does not exist when no endpoint
+	// declares a ResponsePath - Go rejects an unused variable, and the previous
+	// version of this fix emitted `switch key := ...` with zero cases, which
+	// broke the build for every spec without response paths.
+	key := resource + "\x00" + path
+	_ = key // no cases below when no endpoint declares a ResponsePath
+	switch {
 {{- range $resourceName, $resource := .Resources}}
 {{- range $endpointName, $endpoint := $resource.Endpoints}}
 {{- if $endpoint.ResponsePath}}
